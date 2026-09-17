@@ -1,0 +1,11 @@
+{
+  "schema": "opsnex.hivra.plugin.signers",
+  "version": 1,
+  "signers": [
+    {
+      "source_id": "wsorr.hivra.plugins",
+      "key_id": "f4757da54ecb6f16431bcfb4fcc947633d6f68c9b4576b69ddb61fc4fe2de7a3",
+      "public_key_hex": "f36408d70b8a5b2069815a862a8f6f111e74b450226a0511058055f2969812ac"
+    }
+  ]
+}
