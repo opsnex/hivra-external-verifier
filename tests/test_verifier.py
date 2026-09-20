@@ -176,6 +176,17 @@ class VerifierTest(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "duplicated"):
             verify_archive_bytes(entry, package)
 
+    def test_rejects_signed_package_with_unsupported_abi(self) -> None:
+        manifest = copy.deepcopy(self.manifest)
+        manifest["runtime"]["abi"] = "unsupported_abi"
+        package = canonical_archive(manifest)
+        entry = {**self.entry, "sha256_hex": hashlib.sha256(package).hexdigest()}
+        # A valid signature and matching digest must not bypass compatibility.
+        catalog = self._signed_catalog(entry)
+        verified_entries = verify_catalog_document(catalog, self.trust)
+        with self.assertRaisesRegex(ValidationError, "unsupported host ABI"):
+            verify_archive_bytes(verified_entries[0], package)
+
 
 if __name__ == "__main__":
     unittest.main()
