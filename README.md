@@ -1,8 +1,8 @@
 # Opxnex Hivra External Verifier
 
 This repository is an independent consumer workspace for published Hivra
-surfaces. Its current implementation verifies the WASM plugin supply chain
-from outside the Hivra source tree.
+surfaces. It verifies the WASM plugin supply chain and packaged Capsule
+releases from outside the Hivra source tree.
 
 It is not a Hivra mirror, a second plugin registry, or an alternative runtime.
 The canonical projects remain:
@@ -31,6 +31,14 @@ The verifier starts from bounded untrusted bytes and checks:
 It never executes plugin WASM and never accesses Capsule data, credentials,
 release signing keys, a VPS, or an exchange.
 
+For a packaged Capsule release, it independently checks:
+
+1. the exact published asset set and immutable tag-bound URLs;
+2. GitHub's asset digests against the published checksum document;
+3. the complete macOS and Android bytes through streaming SHA-256;
+4. matching clean-source metadata for both platforms;
+5. the annotated tag target and the bounded signoff-only diff after build.
+
 ## Requirements
 
 - Python 3.11 or newer
@@ -56,6 +64,16 @@ Verify one catalog entry:
 Use `--catalog-url` only when intentionally testing another signed catalog.
 Changing `trust/hivra-plugin-signers.json` changes the trust boundary and must
 receive explicit review.
+
+Verify the current packaged Capsule release without a Hivra source checkout:
+
+```bash
+./verify.sh --release-tag v1.0.3-test21 --self-test
+```
+
+The release verifier proves publication consistency and source lineage. It
+does not claim that an unsigned test build is notarized or suitable for a
+public stable channel.
 
 ## Test
 

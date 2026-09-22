@@ -12,6 +12,10 @@ from opsnex_verifier.verifier import (
     TrustedSigner,
     ValidationError,
     canonical_json,
+    parse_checksum_document,
+    parse_release_metadata,
+    validate_release_document,
+    validate_release_lineage,
     verify_archive_bytes,
     verify_catalog_document,
 )
@@ -186,6 +190,150 @@ class VerifierTest(unittest.TestCase):
         verified_entries = verify_catalog_document(catalog, self.trust)
         with self.assertRaisesRegex(ValidationError, "unsupported host ABI"):
             verify_archive_bytes(verified_entries[0], package)
+
+
+class ReleaseVerifierTest(unittest.TestCase):
+    tag = "v1.0.3-test21"
+    source_commit = "1" * 40
+    tag_commit = "2" * 40
+    mac_name = f"hivra_app-{tag}-macos-universal.zip"
+    android_name = f"hivra_app-{tag}-android-universal.apk"
+    mac_meta_name = "RELEASE-METADATA-macos.txt"
+    android_meta_name = "RELEASE-METADATA-android.txt"
+    sums_name = f"SHA256SUMS-{tag}.txt"
+
+    def setUp(self) -> None:
+        self.digests = {
+            self.mac_name: "a" * 64,
+            self.android_name: "b" * 64,
+            self.mac_meta_name: "c" * 64,
+            self.android_meta_name: "d" * 64,
+        }
+        names = (
+            self.mac_name,
+            self.android_name,
+            self.mac_meta_name,
+            self.android_meta_name,
+            self.sums_name,
+        )
+        self.release = {
+            "tag_name": self.tag,
+            "draft": False,
+            "prerelease": True,
+            "assets": [
+                {
+                    "name": name,
+                    "state": "uploaded",
+                    "digest": f"sha256:{'e' * 64}",
+                    "browser_download_url": (
+                        "https://github.com/WSorr/Hivra-App/releases/download/"
+                        f"{self.tag}/{name}"
+                    ),
+                }
+                for name in names
+            ],
+        }
+
+    def test_accepts_complete_pinned_release_document(self) -> None:
+        assets = validate_release_document(self.release, self.tag)
+        self.assertEqual(
+            set(assets),
+            {asset["name"] for asset in self.release["assets"]},
+        )
+
+    def test_rejects_unpinned_release_asset_url(self) -> None:
+        mutated = copy.deepcopy(self.release)
+        mutated["assets"][0]["browser_download_url"] = (
+            "https://example.invalid/release.zip"
+        )
+        with self.assertRaisesRegex(ValidationError, "not pinned"):
+            validate_release_document(mutated, self.tag)
+
+    def test_binds_release_urls_to_selected_repository(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "not pinned"):
+            validate_release_document(
+                self.release,
+                self.tag,
+                repository="opsnex/hivra-external-verifier",
+            )
+
+    def test_rejects_duplicate_release_asset(self) -> None:
+        mutated = copy.deepcopy(self.release)
+        mutated["assets"].append(copy.deepcopy(mutated["assets"][0]))
+        with self.assertRaisesRegex(ValidationError, "duplicate release asset"):
+            validate_release_document(mutated, self.tag)
+
+    def test_accepts_canonical_checksum_document(self) -> None:
+        raw = "".join(
+            f"{digest}  {name}\n" for name, digest in self.digests.items()
+        ).encode()
+        self.assertEqual(
+            parse_checksum_document(raw, set(self.digests)), self.digests
+        )
+
+    def test_rejects_checksum_path_or_duplicate(self) -> None:
+        raw = (
+            f"{'a' * 64}  {self.mac_name}\n"
+            f"{'a' * 64}  {self.mac_name}\n"
+            f"{'b' * 64}  ../{self.android_name}\n"
+        ).encode()
+        with self.assertRaises(ValidationError):
+            parse_checksum_document(raw, set(self.digests))
+
+    def test_accepts_clean_release_metadata(self) -> None:
+        raw = self._metadata(self.mac_name, self.digests[self.mac_name])
+        values = parse_release_metadata(
+            raw,
+            tag=self.tag,
+            channel="test",
+            asset_name=self.mac_name,
+            asset_sha256=self.digests[self.mac_name],
+        )
+        self.assertEqual(values["source_commit"], self.source_commit)
+
+    def test_rejects_dirty_or_mismatched_release_metadata(self) -> None:
+        raw = self._metadata(
+            self.mac_name,
+            self.digests[self.mac_name],
+            dirty="yes",
+        )
+        with self.assertRaisesRegex(ValidationError, "dirty source tree"):
+            parse_release_metadata(
+                raw,
+                tag=self.tag,
+                channel="test",
+                asset_name=self.mac_name,
+                asset_sha256=self.digests[self.mac_name],
+            )
+
+    def test_accepts_only_signoff_change_after_build(self) -> None:
+        validate_release_lineage(
+            source_commit=self.source_commit,
+            tag_commit=self.tag_commit,
+            changed_files={"docs/checklists/release-manual-signoff-log.md"},
+        )
+
+    def test_rejects_runtime_change_after_build(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "runtime-affecting"):
+            validate_release_lineage(
+                source_commit=self.source_commit,
+                tag_commit=self.tag_commit,
+                changed_files={"flutter/lib/main.dart"},
+            )
+
+    def _metadata(
+        self, asset_name: str, asset_sha256: str, *, dirty: str = "no"
+    ) -> bytes:
+        return (
+            f"version={self.tag}\n"
+            f"source_commit={self.source_commit}\n"
+            f"source_tree_dirty={dirty}\n"
+            "flutter_build_name=1.0.3\n"
+            "flutter_build_number=100030219\n"
+            "channel=test\n"
+            f"asset={asset_name}\n"
+            f"asset_sha256={asset_sha256}\n"
+        ).encode()
 
 
 if __name__ == "__main__":

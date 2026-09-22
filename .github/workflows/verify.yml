@@ -11,6 +11,9 @@ on:
 permissions:
   contents: read
 
+env:
+  HIVRA_RELEASE_TAG: v1.0.3-test21
+
 jobs:
   verify:
     runs-on: ubuntu-24.04
@@ -28,3 +31,6 @@ jobs:
 
       - name: Verify every published package as an external consumer
         run: ./verify.sh --self-test
+
+      - name: Verify current Hivra release as an external consumer
+        run: ./verify.sh --release-tag "$HIVRA_RELEASE_TAG" --self-test

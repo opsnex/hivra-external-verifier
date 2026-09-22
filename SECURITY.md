@@ -3,8 +3,14 @@
 ## Supported Surface
 
 Only the latest `main` branch is maintained. The verifier handles remote
-catalog and ZIP bytes as untrusted input, verifies signatures and digests before
-trusting metadata, and inspects archives without extracting or executing them.
+catalogs, release documents, metadata, checksums, ZIPs, and application
+binaries as untrusted input. It verifies signatures or publication digests
+before trusting metadata and inspects plugin archives without extracting or
+executing them.
+
+GitHub is the publication source for Capsule release assets and tag lineage.
+Release verification proves consistency with that source; it is not an
+independent release signature, notarization, or execution-safety assessment.
 
 ## Report A Vulnerability
 

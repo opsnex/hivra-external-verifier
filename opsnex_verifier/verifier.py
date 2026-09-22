@@ -14,7 +14,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 
 DEFAULT_CATALOG_URL = (
@@ -28,6 +28,13 @@ DEFAULT_TRUST_STORE = (
 )
 MAX_CATALOG_BYTES = 1_000_000
 MAX_PACKAGE_BYTES = 16_000_000
+MAX_RELEASE_DOCUMENT_BYTES = 64_000
+MAX_MACOS_RELEASE_BYTES = 128_000_000
+MAX_ANDROID_RELEASE_BYTES = 256_000_000
+DEFAULT_RELEASE_REPOSITORY = "WSorr/Hivra-App"
+RELEASE_POST_BUILD_ALLOWLIST = frozenset(
+    {"docs/checklists/release-manual-signoff-log.md"}
+)
 EXPECTED_ARCHIVE_ENTRIES = (
     "plugin/manifest.json",
     "plugin/module.wasm",
@@ -54,6 +61,16 @@ class VerificationResult:
     package_sha256: str
     manifest_sha256: str
     wasm_sha256: str
+
+
+@dataclass(frozen=True)
+class ReleaseVerificationResult:
+    tag: str
+    channel: str
+    source_commit: str
+    tag_commit: str
+    macos_sha256: str
+    android_sha256: str
 
 
 def _require_hex(value: Any, length: int, field: str) -> str:
@@ -326,6 +343,364 @@ def _fetch_bytes(url: str, max_bytes: int) -> bytes:
     return payload
 
 
+def _fetch_json(url: str, max_bytes: int) -> dict[str, Any]:
+    return _decode_json(_fetch_bytes(url, max_bytes), url)
+
+
+def _hash_remote_bytes(url: str, max_bytes: int) -> str:
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "opsnex-hivra-release-verifier/1"},
+    )
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            if urlparse(response.geturl()).scheme != "https":
+                raise ValidationError("redirect left HTTPS")
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValidationError(
+                        f"download exceeded {max_bytes} bytes for {url}"
+                    )
+                digest.update(chunk)
+    except ValidationError:
+        raise
+    except Exception as error:
+        raise ValidationError(f"download failed for {url}: {error}") from error
+    return digest.hexdigest()
+
+
+def _release_asset_names(tag: str) -> tuple[str, ...]:
+    return (
+        f"hivra_app-{tag}-macos-universal.zip",
+        f"hivra_app-{tag}-android-universal.apk",
+        "RELEASE-METADATA-macos.txt",
+        "RELEASE-METADATA-android.txt",
+        f"SHA256SUMS-{tag}.txt",
+    )
+
+
+def validate_release_document(
+    release: dict[str, Any],
+    tag: str,
+    repository: str = DEFAULT_RELEASE_REPOSITORY,
+) -> dict[str, dict[str, Any]]:
+    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None:
+        raise ValidationError("invalid GitHub repository")
+    if release.get("tag_name") != tag:
+        raise ValidationError("release tag mismatch")
+    if release.get("draft") is not False:
+        raise ValidationError("release must be published")
+
+    expected_names = set(_release_asset_names(tag))
+    raw_assets = release.get("assets")
+    if not isinstance(raw_assets, list):
+        raise ValidationError("release assets must be a list")
+    assets: dict[str, dict[str, Any]] = {}
+    for index, asset in enumerate(raw_assets):
+        if not isinstance(asset, dict):
+            raise ValidationError(f"release assets[{index}] must be an object")
+        name = _require_non_empty(asset.get("name"), "release asset name")
+        if name in assets:
+            raise ValidationError(f"duplicate release asset {name}")
+        assets[name] = asset
+
+    if set(assets) != expected_names:
+        missing = sorted(expected_names - set(assets))
+        extra = sorted(set(assets) - expected_names)
+        raise ValidationError(
+            f"release asset set mismatch; missing={missing} extra={extra}"
+        )
+
+    for name, asset in assets.items():
+        if asset.get("state") != "uploaded":
+            raise ValidationError(f"{name}: asset is not uploaded")
+        digest = str(asset.get("digest") or "")
+        if not digest.startswith("sha256:"):
+            raise ValidationError(f"{name}: GitHub SHA-256 digest is missing")
+        _require_hex(digest.removeprefix("sha256:"), 64, f"{name}.digest")
+        url = _require_non_empty(
+            asset.get("browser_download_url"), f"{name}.download_url"
+        )
+        parsed = urlparse(url)
+        expected_path = f"/{repository}/releases/download/{tag}/{name}"
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != "github.com"
+            or parsed.path != expected_path
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValidationError(f"{name}: release URL is not pinned")
+    return assets
+
+
+def parse_checksum_document(
+    raw: bytes, expected_names: set[str]
+) -> dict[str, str]:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValidationError("release checksums are not UTF-8") from error
+    checksums: dict[str, str] = {}
+    for line in text.splitlines():
+        match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9._+-]+)", line)
+        if match is None:
+            raise ValidationError("release checksum line is not canonical")
+        digest, name = match.groups()
+        if name in checksums:
+            raise ValidationError(f"duplicate release checksum {name}")
+        checksums[name] = digest
+    if set(checksums) != expected_names:
+        raise ValidationError("release checksum asset set mismatch")
+    return checksums
+
+
+def parse_release_metadata(
+    raw: bytes,
+    *,
+    tag: str,
+    channel: str,
+    asset_name: str,
+    asset_sha256: str,
+) -> dict[str, str]:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValidationError("release metadata is not UTF-8") from error
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        if "=" not in line:
+            raise ValidationError("release metadata line is not canonical")
+        key, value = line.split("=", 1)
+        if not key or key in values:
+            raise ValidationError("release metadata has an invalid key")
+        values[key] = value
+
+    required = {
+        "version",
+        "source_commit",
+        "source_tree_dirty",
+        "flutter_build_name",
+        "flutter_build_number",
+        "channel",
+        "asset",
+        "asset_sha256",
+    }
+    if not required.issubset(values):
+        raise ValidationError("release metadata is missing required fields")
+    if values["version"] != tag or values["channel"] != channel:
+        raise ValidationError("release metadata version or channel mismatch")
+    if values["source_tree_dirty"] != "no":
+        raise ValidationError("release metadata records a dirty source tree")
+    _require_hex(values["source_commit"], 40, "source_commit")
+    if values["asset"] != asset_name:
+        raise ValidationError("release metadata asset name mismatch")
+    if values["asset_sha256"] != asset_sha256:
+        raise ValidationError("release metadata asset digest mismatch")
+    return values
+
+
+def validate_release_lineage(
+    *, source_commit: str, tag_commit: str, changed_files: set[str]
+) -> None:
+    _require_hex(source_commit, 40, "source_commit")
+    _require_hex(tag_commit, 40, "tag_commit")
+    if source_commit == tag_commit:
+        if changed_files:
+            raise ValidationError("identical release commits reported changed files")
+        return
+    unexpected = changed_files - RELEASE_POST_BUILD_ALLOWLIST
+    if unexpected:
+        raise ValidationError(
+            "runtime-affecting files changed after artifact build: "
+            + ", ".join(sorted(unexpected))
+        )
+
+
+def _github_api_url(repository: str, suffix: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None:
+        raise ValidationError("invalid GitHub repository")
+    return f"https://api.github.com/repos/{repository}/{suffix}"
+
+
+def _resolve_tag_commit(repository: str, tag: str) -> str:
+    reference = _fetch_json(
+        _github_api_url(repository, f"git/ref/tags/{quote(tag, safe='')}"),
+        MAX_RELEASE_DOCUMENT_BYTES,
+    )
+    target = reference.get("object")
+    for _ in range(4):
+        if not isinstance(target, dict):
+            raise ValidationError("GitHub tag target is missing")
+        target_type = target.get("type")
+        target_sha = _require_hex(target.get("sha"), 40, "tag target sha")
+        if target_type == "commit":
+            return target_sha
+        if target_type != "tag":
+            raise ValidationError("GitHub tag target is not a commit or tag")
+        annotated = _fetch_json(
+            _github_api_url(repository, f"git/tags/{target_sha}"),
+            MAX_RELEASE_DOCUMENT_BYTES,
+        )
+        target = annotated.get("object")
+    raise ValidationError("GitHub tag indirection is too deep")
+
+
+def _verify_release_lineage(
+    repository: str, source_commit: str, tag_commit: str
+) -> None:
+    if source_commit == tag_commit:
+        validate_release_lineage(
+            source_commit=source_commit,
+            tag_commit=tag_commit,
+            changed_files=set(),
+        )
+        return
+    comparison = _fetch_json(
+        _github_api_url(
+            repository,
+            f"compare/{source_commit}...{tag_commit}",
+        ),
+        1_000_000,
+    )
+    if comparison.get("status") != "ahead":
+        raise ValidationError("artifact source is not an ancestor of release tag")
+    raw_files = comparison.get("files")
+    if not isinstance(raw_files, list):
+        raise ValidationError("GitHub comparison files are missing")
+    changed_files = {
+        _require_non_empty(item.get("filename"), "comparison filename")
+        for item in raw_files
+        if isinstance(item, dict)
+    }
+    if len(changed_files) != len(raw_files):
+        raise ValidationError("GitHub comparison contains invalid files")
+    validate_release_lineage(
+        source_commit=source_commit,
+        tag_commit=tag_commit,
+        changed_files=changed_files,
+    )
+
+
+def _run_release(args: argparse.Namespace) -> ReleaseVerificationResult:
+    tag = _require_non_empty(args.release_tag, "release tag")
+    repository = _require_non_empty(
+        args.release_repository, "release repository"
+    )
+    release = _fetch_json(
+        _github_api_url(
+            repository,
+            f"releases/tags/{quote(tag, safe='')}",
+        ),
+        1_000_000,
+    )
+    assets = validate_release_document(release, tag, repository)
+    channel = "test" if release.get("prerelease") is True else "public"
+
+    mac_name, android_name, mac_meta_name, android_meta_name, sums_name = (
+        _release_asset_names(tag)
+    )
+    checksum_bytes = _fetch_bytes(
+        str(assets[sums_name]["browser_download_url"]),
+        MAX_RELEASE_DOCUMENT_BYTES,
+    )
+    expected_checksum_names = {
+        mac_name,
+        android_name,
+        mac_meta_name,
+        android_meta_name,
+    }
+    checksums = parse_checksum_document(
+        checksum_bytes, expected_checksum_names
+    )
+    github_sums_digest = str(assets[sums_name]["digest"]).removeprefix(
+        "sha256:"
+    )
+    if hashlib.sha256(checksum_bytes).hexdigest() != github_sums_digest:
+        raise ValidationError("checksum document disagrees with GitHub digest")
+
+    metadata: dict[str, dict[str, str]] = {}
+    for platform, metadata_name, asset_name in (
+        ("macOS", mac_meta_name, mac_name),
+        ("Android", android_meta_name, android_name),
+    ):
+        raw = _fetch_bytes(
+            str(assets[metadata_name]["browser_download_url"]),
+            MAX_RELEASE_DOCUMENT_BYTES,
+        )
+        actual = hashlib.sha256(raw).hexdigest()
+        github_digest = str(assets[metadata_name]["digest"]).removeprefix(
+            "sha256:"
+        )
+        if actual != checksums[metadata_name] or actual != github_digest:
+            raise ValidationError(f"{platform} metadata digest mismatch")
+        metadata[platform] = parse_release_metadata(
+            raw,
+            tag=tag,
+            channel=channel,
+            asset_name=asset_name,
+            asset_sha256=checksums[asset_name],
+        )
+
+    shared_fields = (
+        "source_commit",
+        "flutter_build_name",
+        "flutter_build_number",
+        "channel",
+    )
+    for field in shared_fields:
+        if metadata["macOS"][field] != metadata["Android"][field]:
+            raise ValidationError(f"release metadata disagrees on {field}")
+
+    if args.self_test:
+        mutated = dict(checksums)
+        mutated[mac_name] = "0" * 64
+        try:
+            parse_release_metadata(
+                _fetch_bytes(
+                    str(assets[mac_meta_name]["browser_download_url"]),
+                    MAX_RELEASE_DOCUMENT_BYTES,
+                ),
+                tag=tag,
+                channel=channel,
+                asset_name=mac_name,
+                asset_sha256=mutated[mac_name],
+            )
+        except ValidationError:
+            pass
+        else:
+            raise ValidationError("release checksum mutation was accepted")
+
+    for name, maximum in (
+        (mac_name, MAX_MACOS_RELEASE_BYTES),
+        (android_name, MAX_ANDROID_RELEASE_BYTES),
+    ):
+        actual = _hash_remote_bytes(
+            str(assets[name]["browser_download_url"]), maximum
+        )
+        github_digest = str(assets[name]["digest"]).removeprefix("sha256:")
+        if actual != checksums[name] or actual != github_digest:
+            raise ValidationError(f"{name}: published bytes digest mismatch")
+
+    source_commit = metadata["macOS"]["source_commit"]
+    tag_commit = _resolve_tag_commit(repository, tag)
+    _verify_release_lineage(repository, source_commit, tag_commit)
+    return ReleaseVerificationResult(
+        tag=tag,
+        channel=channel,
+        source_commit=source_commit,
+        tag_commit=tag_commit,
+        macos_sha256=checksums[mac_name],
+        android_sha256=checksums[android_name],
+    )
+
+
 def _select_entries(
     entries: list[dict[str, Any]], requested_ids: list[str]
 ) -> list[dict[str, Any]]:
@@ -382,6 +757,15 @@ def main() -> None:
     parser.add_argument("--catalog-url", default=DEFAULT_CATALOG_URL)
     parser.add_argument("--trust-store", type=Path, default=DEFAULT_TRUST_STORE)
     parser.add_argument(
+        "--release-tag",
+        help="Verify one published Hivra-App release instead of plugin packages.",
+    )
+    parser.add_argument(
+        "--release-repository",
+        default=DEFAULT_RELEASE_REPOSITORY,
+        help="GitHub owner/repository for --release-tag.",
+    )
+    parser.add_argument(
         "--plugin-id",
         action="append",
         default=[],
@@ -395,6 +779,22 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
+        if args.release_tag:
+            if args.plugin_id:
+                raise ValidationError(
+                    "--plugin-id cannot be combined with --release-tag"
+                )
+            release_result = _run_release(args)
+            print(
+                "verified release "
+                f"tag={release_result.tag} channel={release_result.channel} "
+                f"source_commit={release_result.source_commit} "
+                f"tag_commit={release_result.tag_commit} "
+                f"macos_sha256={release_result.macos_sha256} "
+                f"android_sha256={release_result.android_sha256}"
+            )
+            print("release verification passed")
+            return
         results = _run_live(args)
     except ValidationError as error:
         print(f"verification failed: {error}", file=sys.stderr)

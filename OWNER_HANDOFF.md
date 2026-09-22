@@ -8,6 +8,7 @@
   checks.
 - Added offline positive and negative mutation tests.
 - Added one live consumer probe in GitHub Actions.
+- Added independent packaged Capsule release digest and lineage verification.
 - Documented contribution and security boundaries.
 
 No Hivra runtime code, private material, VPS state, or release authority was
@@ -21,11 +22,13 @@ Own the external-consumer view of Hivra public surfaces:
 2. Keep failures reproducible from a clean clone.
 3. Open focused upstream issues when a public package cannot be independently
    verified.
-4. Maintain bounded public website and Capsule release checks here only when
-   they consume public artifacts and do not duplicate implementation.
-5. Submit product fixes through focused forks and upstream pull requests rather
+4. Keep the pinned Capsule release probe current and report any digest,
+   metadata, tag-lineage, or asset-set mismatch upstream.
+5. Maintain bounded public website checks here only when they consume public
+   artifacts and do not duplicate implementation.
+6. Submit product fixes through focused forks and upstream pull requests rather
    than implementing an alternative runtime here.
-6. Keep this repository external and read-only; reject signing, deployment,
+7. Keep this repository external and read-only; reject signing, deployment,
    trading, Capsule data, VPS access, and unrelated DevOps work.
 
 ## First Owner Actions
