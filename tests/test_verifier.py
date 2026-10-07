@@ -191,6 +191,26 @@ class VerifierTest(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "unsupported host ABI"):
             verify_archive_bytes(verified_entries[0], package)
 
+    def test_rejects_signed_package_with_unsupported_entry_export(self) -> None:
+        manifest = copy.deepcopy(self.manifest)
+        manifest["runtime"]["entry_export"] = "unsupported_entry"
+        package = canonical_archive(manifest)
+        entry = {**self.entry, "sha256_hex": hashlib.sha256(package).hexdigest()}
+        catalog = self._signed_catalog(entry)
+        verified_entries = verify_catalog_document(catalog, self.trust)
+        with self.assertRaisesRegex(ValidationError, "unsupported entry export"):
+            verify_archive_bytes(verified_entries[0], package)
+
+    def test_rejects_signed_package_with_wrong_module_path(self) -> None:
+        manifest = copy.deepcopy(self.manifest)
+        manifest["runtime"]["module_path"] = "plugin/other.wasm"
+        package = canonical_archive(manifest)
+        entry = {**self.entry, "sha256_hex": hashlib.sha256(package).hexdigest()}
+        catalog = self._signed_catalog(entry)
+        verified_entries = verify_catalog_document(catalog, self.trust)
+        with self.assertRaisesRegex(ValidationError, "module path mismatch"):
+            verify_archive_bytes(verified_entries[0], package)
+
 
 class ReleaseVerifierTest(unittest.TestCase):
     tag = "v1.0.3-test21"
