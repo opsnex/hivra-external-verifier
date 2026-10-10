@@ -22,7 +22,7 @@ a concrete security requirement cannot be met with Python and OpenSSL.
 ```bash
 python3 -m unittest discover -s tests -v
 ./verify.sh --plugin-id capsule-chat-test --self-test
-./verify.sh --release-tag v1.0.3-test21 --self-test
+./verify.sh --release-tag v1.0.4-test1 --self-test
 ```
 
 Describe the external behavior that changed and the exact untrusted input that

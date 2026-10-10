@@ -213,7 +213,7 @@ class VerifierTest(unittest.TestCase):
 
 
 class ReleaseVerifierTest(unittest.TestCase):
-    tag = "v1.0.3-test21"
+    tag = "v1.0.4-test1"
     source_commit = "1" * 40
     tag_commit = "2" * 40
     mac_name = f"hivra_app-{tag}-macos-universal.zip"

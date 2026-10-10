@@ -68,7 +68,7 @@ receive explicit review.
 Verify the current packaged Capsule release without a Hivra source checkout:
 
 ```bash
-./verify.sh --release-tag v1.0.3-test21 --self-test
+./verify.sh --release-tag v1.0.4-test1 --self-test
 ```
 
 The release verifier proves publication consistency and source lineage. It

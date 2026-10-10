@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 env:
-  HIVRA_RELEASE_TAG: v1.0.3-test21
+  HIVRA_RELEASE_TAG: v1.0.4-test1
 
 jobs:
   verify:
